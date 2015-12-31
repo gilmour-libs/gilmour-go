@@ -23,7 +23,7 @@ const (
 
 var engine *Gilmour
 
-var redis = backends.MakeRedis("127.0.0.1:6379")
+var redis = backends.MakeRedis("127.0.0.1:6379", "")
 
 var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 

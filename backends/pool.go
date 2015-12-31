@@ -8,7 +8,7 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
-func newPool(server string) *redis.Pool {
+func newPool(server, password string) *redis.Pool {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	return &redis.Pool{
@@ -19,6 +19,14 @@ func newPool(server string) *redis.Pool {
 			if err != nil {
 				return nil, err
 			}
+
+			if password != "" {
+				if _, err := c.Do("AUTH", password); err != nil {
+					c.Close()
+					return nil, err
+				}
+			}
+
 			return c, err
 		},
 		TestOnBorrow: func(c redis.Conn, t time.Time) error {
@@ -33,11 +41,11 @@ var cached = struct {
 	pool *redis.Pool
 }{}
 
-func GetPool(redis_host string) *redis.Pool {
+func GetPool(redis_host, password string) *redis.Pool {
 
 	cached.Lock()
 	if cached.pool == nil {
-		cached.pool = newPool(redis_host)
+		cached.pool = newPool(redis_host, password)
 	}
 	cached.Unlock()
 

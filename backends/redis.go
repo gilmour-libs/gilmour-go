@@ -17,8 +17,8 @@ const defaultResponseTopic = "gilmour.response"
 const defaultIdentKey = "gilmour.known_host.health"
 const defaultErrorBuffer = 9999
 
-func MakeRedis(host string) *Redis {
-	redisPool := GetPool(host)
+func MakeRedis(host, password string) *Redis {
+	redisPool := GetPool(host, password)
 	return &Redis{
 		redisPool:  redisPool,
 		pubsubConn: redis.PubSubConn{Conn: redisPool.Get()},
