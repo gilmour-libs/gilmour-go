@@ -70,12 +70,17 @@ func (rc *RequestComposer) With(t interface{}) *RequestComposer {
 	return rc
 }
 
-func (rc *RequestComposer) Execute(m *Message) (*Response, error) {
+func (rc *RequestComposer) Execute(m *Message) (resp *Response, err error) {
 	if rc.message != nil {
 		if err := compositionMerge(m.rawData(), &rc.message); err != nil {
 			return nil, err
 		}
 	}
 
-	return rc.engine.request(rc.topic, m, rc.opts)
+	err = try(rc.engine, func() (err error) {
+		resp, err = rc.engine.request(rc.topic, m, rc.opts)
+		return
+	})
+
+	return
 }

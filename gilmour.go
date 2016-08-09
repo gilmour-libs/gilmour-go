@@ -3,6 +3,7 @@ package gilmour
 import (
 	"errors"
 	"fmt"
+	"net"
 	"runtime"
 	"strings"
 	"sync"
@@ -25,6 +26,11 @@ func Get(backend Backend) *Gilmour {
 	return &x
 }
 
+type retryConf struct {
+	Timeout  time.Duration
+	Interval time.Duration
+}
+
 type Gilmour struct {
 	enableHealthCheck bool
 	identMutex        sync.RWMutex
@@ -33,6 +39,28 @@ type Gilmour struct {
 	ident             string
 	errorPolicy       string
 	subscriber        subscriber
+	retryTimeout      time.Duration
+	retryInterval     time.Duration
+}
+
+func (g *Gilmour) SetRetryTimeout(t time.Duration) {
+	g.retryTimeout = t
+}
+
+func (g *Gilmour) GetRetryTimeout() time.Duration {
+	return g.retryTimeout
+}
+
+func (g *Gilmour) SetRetryInterval(t time.Duration) {
+	g.retryInterval = t
+}
+
+func (g *Gilmour) GetRetryInterval() time.Duration {
+	if g.retryInterval == 0 {
+		return g.GetRetryTimeout() / 8
+	}
+
+	return g.retryInterval
 }
 
 // Start the Gilmour engine. Creates a bi-directional channel; sent to both
@@ -288,7 +316,10 @@ func (g *Gilmour) unsubscribe(topic string, s *Subscription) {
 	g.removeSubscriber(topic, s)
 
 	if _, ok := g.getSubscribers(topic); !ok {
-		err := g.backend.Unsubscribe(topic)
+		err := try(g, func() error {
+			return g.backend.Unsubscribe(topic)
+		})
+
 		if err != nil {
 			panic(err)
 		}
@@ -370,7 +401,13 @@ func (g *Gilmour) ReplyTo(topic string, h RequestHandler, opts *HandlerOpts) (*S
 		h(req, resp)
 	}
 
-	return g.subscribe(g.requestDestination(topic), handler, opts)
+	var resp *Subscription
+	err := try(g, func() (err error) {
+		resp, err = g.subscribe(g.requestDestination(topic), handler, opts)
+		return
+	})
+
+	return resp, err
 }
 
 //Unsubscribe Previously registered Reply to.
@@ -433,7 +470,13 @@ func (g *Gilmour) Slot(topic string, h SlotHandler, opts *HandlerOpts) (*Subscri
 		h(req)
 	}
 
-	return g.subscribe(g.slotDestination(topic), handler, opts)
+	var resp *Subscription
+	err := try(g, func() (err error) {
+		resp, err = g.subscribe(g.slotDestination(topic), handler, opts)
+		return
+	})
+
+	return resp, err
 }
 
 func (g *Gilmour) UnsubscribeSlot(topic string, s *Subscription) {
@@ -448,7 +491,12 @@ func (g *Gilmour) Signal(topic string, msg *Message) (sender string, err error) 
 
 	sender = makeSenderId()
 	msg.setSender(sender)
-	return sender, g.publish(g.slotDestination(topic), msg)
+
+	err = try(g, func() error {
+		return g.publish(g.slotDestination(topic), msg)
+	})
+
+	return sender, err
 }
 
 // Internal method to publish a message.
@@ -474,4 +522,28 @@ func (g *Gilmour) publish(topic string, msg *Message) error {
 	}
 
 	return g.backend.Publish(topic, msg)
+}
+
+func isNetworkError(err error) bool {
+	if _, ok := err.(net.Error); ok {
+		return true
+	} else {
+		return false
+	}
+}
+
+func isExpired(timeout time.Duration, startTime time.Time) bool {
+	return time.Now().After(startTime.Add(timeout))
+}
+
+func try(g *Gilmour, fn func() error) (err error) {
+	startTime := time.Now()
+	for {
+		err = fn()
+		if isExpired(g.GetRetryTimeout(), startTime) || !isNetworkError(err) || err == nil {
+			break
+		}
+		time.Sleep(g.GetRetryInterval())
+	}
+	return
 }

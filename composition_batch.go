@@ -17,7 +17,8 @@ func (c *BatchComposition) Execute(m *Message) (resp *Response, err error) {
 
 	do := func(do recfunc, m *Message) {
 		cmd := c.lpop()
-		resp, err = performJob(cmd, m)
+
+		resp, err = performJob(cmd, m, c.engine)
 
 		// Inflate and record the output in a single response.
 		if c.isRecorded() {

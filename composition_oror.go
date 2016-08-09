@@ -14,7 +14,8 @@ type OrOrComposition struct {
 func (c *OrOrComposition) Execute(m *Message) (resp *Response, err error) {
 	do := func(do recfunc, m *Message) {
 		cmd := c.lpop()
-		resp, err = performJob(cmd, m)
+
+		resp, err = performJob(cmd, m, c.engine)
 
 		// Keep going, If the Pipeline has failed so far and there are still
 		// some executables left.
