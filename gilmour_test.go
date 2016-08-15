@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/gilmour-libs/gilmour-e-go.v4/backends"
-	"gopkg.in/gilmour-libs/gilmour-e-go.v4/ui"
+	"./backends"
+	"./ui"
 )
 
 const (
