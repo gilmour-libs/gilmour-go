@@ -5,55 +5,46 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/mohandutt134/redis.v4"
+	"github.com/garyburd/redigo/redis"
 )
 
 var once sync.Once
 
-func newClient(server, password string) *redis.Client {
+func newPool(server, password string) *redis.Pool {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	options := &redis.Options{
-		Network:     "tcp",
-		Addr:        server,
-		Password:    password,
-		DB:          0,
-		PoolSize:    1000,
+	return &redis.Pool{
+		MaxIdle:     3,
 		IdleTimeout: 240 * time.Second,
-	}
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial("tcp", server)
+			if err != nil {
+				return nil, err
+			}
 
-	return redis.NewClient(options)
+			if password != "" {
+				if _, err := c.Do("AUTH", password); err != nil {
+					c.Close()
+					return nil, err
+				}
+			}
+
+			return c, err
+		},
+		TestOnBorrow: func(c redis.Conn, t time.Time) error {
+			_, err := c.Do("PING")
+			return err
+		},
+	}
 }
 
-func newFailoverClient(master, password string, sentinels []string) *redis.Client {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+var pool *redis.Pool
 
-	options := &redis.FailoverOptions{
-		MasterName:    master,
-		SentinelAddrs: sentinels,
-		Password:      password,
-		DB:            0,
-		PoolSize:      1000,
-		IdleTimeout:   240 * time.Second,
-	}
+func getPool(redis_host, password string) *redis.Pool {
 
-	return redis.NewFailoverClient(options)
-}
-
-var cachedClient, cachedFailoverClient *redis.Client
-
-func getClient(redis_host, password string) *redis.Client {
 	once.Do(func() {
-		cachedClient = newClient(redis_host, password)
+		pool = newPool(redis_host, password)
 	})
 
-	return cachedClient
-}
-
-func getFailoverClient(master, password string, sentinels []string) *redis.Client {
-	once.Do(func() {
-		cachedFailoverClient = newFailoverClient(master, password, sentinels)
-	})
-
-	return cachedFailoverClient
+	return pool
 }

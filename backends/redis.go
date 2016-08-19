@@ -5,10 +5,9 @@ import (
 	"log"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/garyburd/redigo/redis"
 	"gopkg.in/gilmour-libs/gilmour-e-go.v4/protocol"
-	"gopkg.in/mohandutt134/redis.v4"
 )
 
 const defaultErrorQueue = "gilmour.errorqueue"
@@ -16,41 +15,32 @@ const defaultIdentKey = "gilmour.known_host.health"
 const defaultErrorBuffer = 9999
 
 func MakeRedis(host, password string) *Redis {
-	client := getClient(host, password)
+	redisPool := getPool(host, password)
 	return &Redis{
-		client: client,
-		pubsub: client.PubSub(),
-	}
-}
-
-func MakeRedisSentinel(master, password string, sentinels []string) *Redis {
-	client := getFailoverClient(master, password, sentinels)
-	return &Redis{
-		client: client,
-		pubsub: client.PubSub(),
+		redisPool:  redisPool,
+		pubsubConn: redis.PubSubConn{Conn: redisPool.Get()},
 	}
 }
 
 type Redis struct {
-	client *redis.Client
-	pubsub *redis.PubSub
+	redisPool  *redis.Pool
+	pubsubConn redis.PubSubConn
 	sync.Mutex
 }
 
-func (r *Redis) getClient() *redis.Client {
-	return r.client
+func (r *Redis) getPubSubConn() redis.PubSubConn {
+	return r.pubsubConn
 }
 
-func (r *Redis) getPubSub() *redis.PubSub {
-	return r.pubsub
+func (r *Redis) getConn() redis.Conn {
+	return r.redisPool.Get()
 }
 
 func (r *Redis) IsTopicSubscribed(topic string) (bool, error) {
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
-	response := client.PubSubChannels(topic)
-
-	idents, err2 := response.Result()
+	idents, err2 := redis.Strings(conn.Do("PUBSUB", "CHANNELS"))
 	if err2 != nil {
 		log.Println(err2.Error())
 		return false, err2
@@ -66,10 +56,10 @@ func (r *Redis) IsTopicSubscribed(topic string) (bool, error) {
 }
 
 func (r *Redis) HasActiveSubscribers(topic string) (bool, error) {
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
-	response := client.PubSubNumSub(topic)
-	data, err := response.Result()
+	data, err := redis.IntMap(conn.Do("PUBSUB", "NUMSUB", topic))
 	if err == nil {
 		count, has := data[topic]
 		return has && count > 0, err
@@ -79,16 +69,21 @@ func (r *Redis) HasActiveSubscribers(topic string) (bool, error) {
 }
 
 func (r *Redis) AcquireGroupLock(group, sender string) bool {
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
 	key := sender + group
 
-	val, err := client.SetNX(key, key, 600*time.Second).Result()
+	val, err := conn.Do("SET", key, key, "NX", "EX", "600")
 	if err != nil {
 		return false
 	}
 
-	return val
+	if val == nil {
+		return false
+	}
+
+	return true
 }
 
 func (r *Redis) getErrorQueue() string {
@@ -96,8 +91,8 @@ func (r *Redis) getErrorQueue() string {
 }
 
 func (r *Redis) ReportError(method string, message protocol.Error) (err error) {
-	pipeline := r.getClient().Pipeline()
-	defer pipeline.Close()
+	conn := r.getConn()
+	defer conn.Close()
 
 	switch method {
 	case protocol.ErrorPolicyPublish:
@@ -111,10 +106,10 @@ func (r *Redis) ReportError(method string, message protocol.Error) (err error) {
 		}
 
 		queue := r.getErrorQueue()
-		pipeline.LPush(queue, string(msg))
-		pipeline.LTrim(queue, 0, defaultErrorBuffer)
+		conn.Send("LPUSH", queue, string(msg))
+		conn.Send("LTRIM", queue, 0, defaultErrorBuffer)
 
-		_, err = pipeline.Exec()
+		_, err = conn.Receive()
 
 	}
 
@@ -126,12 +121,12 @@ func (r *Redis) Unsubscribe(topic string) (err error) {
 	defer r.Unlock()
 
 	if strings.HasSuffix(topic, "*") {
-		err = r.getPubSub().PUnsubscribe(topic)
+		err = r.getPubSubConn().PUnsubscribe(topic)
 	} else {
-		err = r.getPubSub().Unsubscribe(topic)
+		err = r.getPubSubConn().Unsubscribe(topic)
 	}
 
-	return err
+	return
 }
 
 func (r *Redis) Subscribe(topic, group string) (err error) {
@@ -139,12 +134,12 @@ func (r *Redis) Subscribe(topic, group string) (err error) {
 	defer r.Unlock()
 
 	if strings.HasSuffix(topic, "*") {
-		err = r.getPubSub().PSubscribe(topic)
+		err = r.getPubSubConn().PSubscribe(topic)
 	} else {
-		err = r.getPubSub().Subscribe(topic)
+		err = r.getPubSubConn().Subscribe(topic)
 	}
 
-	return err
+	return
 }
 
 func (r *Redis) getHealthIdent() string {
@@ -171,29 +166,33 @@ func (r *Redis) Publish(topic string, message interface{}) (err error) {
 		return
 	}
 
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
-	_, err = client.Publish(topic, msg).Result()
+	_, err = conn.Do("PUBLISH", topic, msg)
 	return
 }
 
 func (r *Redis) ActiveIdents() (map[string]string, error) {
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
-	return client.HGetAll(r.getHealthIdent()).Result()
+	return redis.StringMap(conn.Do("HGETALL", r.getHealthIdent()))
 }
 
 func (r *Redis) RegisterIdent(uuid string) error {
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
-	_, err := client.HSet(r.getHealthIdent(), uuid, "true").Result()
+	_, err := conn.Do("HSET", r.getHealthIdent(), uuid, "true")
 	return err
 }
 
 func (r *Redis) UnregisterIdent(uuid string) error {
-	client := r.getClient()
+	conn := r.getConn()
+	defer conn.Close()
 
-	_, err := client.HDel(r.getHealthIdent(), uuid).Result()
+	_, err := conn.Do("HDEL", r.getHealthIdent(), uuid)
 	return err
 }
 
@@ -207,19 +206,16 @@ func (r *Redis) Stop() {
 func (r *Redis) setupListeners(sink chan<- *protocol.Message) {
 	go func() {
 		for {
-			resp, _ := r.getPubSub().Receive()
-			switch v := resp.(type) {
-			case *redis.Message:
-				var msg *protocol.Message
-				if v.Pattern == "" {
-					msg = &protocol.Message{"message", v.Channel, v.Payload, v.Channel}
-				} else {
-					msg = &protocol.Message{"pmessage", v.Channel, v.Payload, v.Pattern}
-				}
+			switch v := r.getPubSubConn().Receive().(type) {
+			case redis.PMessage:
+				msg := &protocol.Message{"pmessage", v.Channel, v.Data, v.Pattern}
 				sink <- msg
-			case *redis.Subscription:
+			case redis.Message:
+				msg := &protocol.Message{"message", v.Channel, v.Data, v.Channel}
+				sink <- msg
+			case redis.Subscription:
 				//log.Println("PubSub event", "Channel", v.Channel, "Kind", v.Kind, "Count", v.Count)
-			case *redis.Pong:
+			case redis.Pong:
 				//log.Println("Pong", "Data", v.Data)
 			case error:
 				log.Println("Error", "message", v.Error())
