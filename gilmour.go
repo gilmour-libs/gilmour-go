@@ -46,7 +46,6 @@ func (g *Gilmour) Start() {
 //Exit routine. UnSubscribes Slots, removes registered health ident and
 //triggers backend Stop.
 func (g *Gilmour) Stop() {
-	defer g.unregisterIdent()
 	defer g.backend.Stop()
 
 	for topic, handlers := range g.getAllSubscribers() {
@@ -55,6 +54,8 @@ func (g *Gilmour) Stop() {
 			g.UnsubscribeReply(topic, h)
 		}
 	}
+
+	g.unregisterIdent()
 }
 
 //Keep listening to messages on sink, spinning a new goroutine for every
